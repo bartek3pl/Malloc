@@ -1,0 +1,17 @@
+# Compiled languages
+*.o
+*.so
+*.a
+.*.d
+mdriver
+
+# Python
+*.pyc
+
+# Vim
+*.swp
+*~
+
+# Archives
+*.tar.gz
+*.tgz

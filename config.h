@@ -24,6 +24,7 @@
  */
 
 #ifndef DEFAULT_TRACEFILES
+/* clang-format off */
 #define DEFAULT_TRACEFILES \
   "amptjp-bal.rep", \
   "amptjp.rep", \
@@ -51,6 +52,7 @@
   "short1.rep", \
   "short2-bal.rep", \
   "short2.rep"
+/* clang-format on */
 #endif
 
 /*

@@ -31,7 +31,8 @@
 /* Misc */
 #define MAXLINE 1024 /* max string size */
 #define HDRLINES 4   /* number of header lines in a trace file */
-#define LINENUM(i) (i + 5) /* cnvt trace request nums to linenums (origin 1) */
+/* cnvt trace request nums to linenums (origin 1) */
+#define LINENUM(i) ((i) + 5)
 
 /* Returns true if p is ALIGNMENT-byte aligned */
 #define IS_ALIGNED(p) ((((unsigned long)(p)) % ALIGNMENT) == 0)
