@@ -195,10 +195,10 @@ static void timeout_handler(int sig __attribute__((unused))) {
 
 /* Run the tests; return the number of tests run (may be less than
    num_tracefiles, if there's a timeout) */
-static void run_tests(int num_tracefiles, const char *tracedir,
-                      char **tracefiles, stats_t *mm_stats, range_t *ranges,
-                      speed_t *speed_params) {
-  volatile int i;
+static int run_tests(int num_tracefiles, const char *tracedir,
+                     char **tracefiles, stats_t *mm_stats, range_t *ranges,
+                     speed_t *speed_params) {
+  volatile int i, errors = 0;
   volatile int timed_out = 0;
 
   for (i = 0; i < num_tracefiles; i++) {
@@ -221,10 +221,12 @@ static void run_tests(int num_tracefiles, const char *tracedir,
       if (verbose > 1)
         printf("Checking mm_malloc for correctness, ");
       mm_stats[i].valid = eval_mm_valid(trace, &ranges);
+      if (!mm_stats[i].valid)
+        errors++;
 
       if (onetime_flag) {
         free_trace(trace);
-        return;
+        return errors;
       }
     }
     if (mm_stats[i].valid) {
@@ -243,6 +245,8 @@ static void run_tests(int num_tracefiles, const char *tracedir,
     /* clean up memory system */
     mem_deinit();
   }
+
+  return errors;
 }
 
 /**************
@@ -406,8 +410,8 @@ int main(int argc, char **argv) {
   if (mm_stats == NULL)
     unix_error("mm_stats calloc in main failed");
 
-  run_tests(num_tracefiles, tracedir, tracefiles, mm_stats, ranges,
-            &speed_params);
+  int errors = run_tests(num_tracefiles, tracedir, tracefiles, mm_stats, ranges,
+                         &speed_params);
 
   /* Display the mm results in a compact table */
   if (verbose) {
@@ -528,7 +532,7 @@ int main(int argc, char **argv) {
     printf("\nAUTORESULT_STRING=%s\n", autoresult);
   }
 
-  exit(0);
+  exit(errors);
 }
 
 /*****************************************************************
