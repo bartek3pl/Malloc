@@ -1,14 +1,11 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  Blocks are never coalesced or reused.  The size of
- * a block is found at the first aligned word before the block (we need
- * it for realloc).
- *
- * This code is correct and blazingly fast, but very bad usage-wise since
- * it never frees anything.
- */
+  Bartłomiej Hildebrandt
+  302126
+
+  Oświadczam, że jestem jedynym autorem kodu źródłowego. Rozwiązanie jest
+  inspirowane rozwiązaniem przedstawionym w rozdziale §9.9 książki CSAPP.
+*/
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,58 +36,274 @@
 #define calloc mm_calloc
 #endif /* def DRIVER */
 
+#define DWORD_ALIGNMENT ALIGNMENT
+
+#define WORD_SIZE 4         /* Word, header and footer size */
+#define DWORD_SIZE 8        /* Double word size */
+#define MIN_BLOCK_SIZE 16   /* Minimum overall size of block */
+#define CHUNKSIZE (1 << 12) /* Extend heap by this amount */
+
+#define MAX_BLOCK_SIZE ~0x7         /* 29 most significant bits */
+#define MAX_ALLOCATION_BIT_SIZE 0x1 /* Just 1 bit for allocation bit */
+
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+/* Merge a block size and allocated bit into a word */
+#define MERGE(size, allocation_bit) ((size) | (allocation_bit))
+
+/* Read and write a word at address p */
+#define GET(p) (*(unsigned int *)(p))
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p) (GET(p) & MAX_BLOCK_SIZE)
+#define GET_ALLOCATION_BIT(p) (GET(p) & MAX_ALLOCATION_BIT_SIZE)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define BLOCK_HEADER(bp) ((char *)(bp)-WORD_SIZE)
+#define BLOCK_FOOTER(bp)                                                       \
+  ((char *)(bp) + GET_SIZE(BLOCK_HEADER(bp)) - DWORD_SIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLOCK(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WORD_SIZE)))
+#define PREV_BLOCK(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DWORD_SIZE)))
+
+// Block allocation bit
+typedef enum {
+  FREE = 0, /* Block is free */
+  USED = 1, /* Block is allocated */
+} bt_alloc_bit;
+
+/* Prologue and epilogue blocks sizes */
+#define PROLOGUE_BLOCK MERGE(DWORD_SIZE, USED)
+#define EPILOGUE_BLOCK MERGE(0, USED)
+
+typedef int32_t word_t; /* Heap is bascially an array of 4-byte words. */
+
+static char *heap_start = 0; /* Address of the first block in heap */
+
+// Memory block structure
 typedef struct {
-  int32_t header;
-  /*
-   * We don't know what the size of the payload will be, so we will
-   * declare it as a zero-length array.  This allow us to obtain a
-   * pointer to the start of the payload.
-   */
-  uint8_t payload[];
+  word_t header;  /* Header with block size and allocation bit */
+  word_t payload; /* Allocated memory + optional padding */
+  word_t footer;  /* Footer with block size and allocation bit */
 } block_t;
 
-static size_t round_up(size_t size) {
-  return (size + ALIGNMENT - 1) & -ALIGNMENT;
+static inline size_t round_up(size_t size) {
+  return DWORD_SIZE * ((DWORD_SIZE + size + (DWORD_SIZE - 1)) / DWORD_SIZE);
 }
 
-static size_t get_size(block_t *block) {
-  return block->header & -2;
+// Try to increase heap size and return start address of new memory
+static void *morecore(size_t size) {
+  void *ptr = mem_sbrk(size);
+  if (ptr == (void *)-1)
+    return NULL;
+  return ptr;
 }
 
-static void set_header(block_t *block, size_t size, bool is_allocated) {
-  block->header = size | is_allocated;
+// Four cases of blocks coalescing
+static void *coalesce(void *bp) {
+  size_t prev_block_allocation_bit =
+    GET_ALLOCATION_BIT(BLOCK_FOOTER(PREV_BLOCK(bp)));
+  size_t next_block_allocation_bit =
+    GET_ALLOCATION_BIT(BLOCK_HEADER(NEXT_BLOCK(bp)));
+  size_t block_size = GET_SIZE(BLOCK_HEADER(bp));
+
+  /* Current block just needs to be freed */
+  if (prev_block_allocation_bit == USED && next_block_allocation_bit == USED) {
+    return bp;
+  }
+
+  else if (prev_block_allocation_bit == USED &&
+           next_block_allocation_bit == FREE) {
+    size_t next_block_size = GET_SIZE(BLOCK_HEADER(NEXT_BLOCK(bp)));
+    /* Update header */
+    PUT(BLOCK_HEADER(bp), MERGE(block_size + next_block_size, FREE));
+    /* Update footer */
+    PUT(BLOCK_FOOTER(bp), MERGE(block_size + next_block_size, FREE));
+  }
+
+  else if (prev_block_allocation_bit == FREE &&
+           next_block_allocation_bit == USED) {
+    size_t prev_block_size = GET_SIZE(BLOCK_HEADER(PREV_BLOCK(bp)));
+    /* Update header */
+    PUT(BLOCK_HEADER(PREV_BLOCK(bp)),
+        MERGE(block_size + prev_block_size, FREE));
+    /* Update footer */
+    PUT(BLOCK_FOOTER(bp), MERGE(block_size + prev_block_size, FREE));
+    /* Update pointer to current block */
+    bp = PREV_BLOCK(bp);
+  }
+
+  else if (prev_block_allocation_bit == FREE &&
+           next_block_allocation_bit == FREE) {
+    size_t prev_block_size = GET_SIZE(BLOCK_HEADER(PREV_BLOCK(bp)));
+    size_t next_block_size = GET_SIZE(BLOCK_HEADER(NEXT_BLOCK(bp)));
+    /* Update header */
+    PUT(BLOCK_HEADER(PREV_BLOCK(bp)),
+        MERGE(block_size + prev_block_size + next_block_size, FREE));
+    /* Update footer */
+    PUT(BLOCK_FOOTER(NEXT_BLOCK(bp)),
+        MERGE(block_size + prev_block_size + next_block_size, FREE));
+    /* Update pointer to current block */
+    bp = PREV_BLOCK(bp);
+  }
+
+  return bp;
+}
+
+// Extend heap by chosen size
+static void *extend_heap(size_t size) {
+  size_t words = size / WORD_SIZE; /* Number of words in size */
+
+  /* New size needs to be double-word aligned, so if the words number is even
+  then we already have proper alignment, else we need to align one more block */
+
+  size_t adjusted_new_size = 0;
+  if (words % 2) {
+    adjusted_new_size = size;
+  } else {
+    adjusted_new_size = size + WORD_SIZE;
+  }
+
+  char *bp = morecore(adjusted_new_size);
+  if (bp == NULL) {
+    return NULL;
+  }
+
+  /* Initialize new epilogue block */
+  PUT(BLOCK_HEADER(NEXT_BLOCK(bp)), EPILOGUE_BLOCK);
+
+  /* Initialize free blocks in new memory */
+  PUT(BLOCK_HEADER(bp), MERGE(adjusted_new_size, FREE)); /* Header */
+  PUT(BLOCK_FOOTER(bp), MERGE(adjusted_new_size, FREE)); /* Footer */
+
+  /* We want to implement immediate coalescing, so if the last block in previous
+   * memory was free we need to coalesce new block in new memory with previous
+   * one */
+  return coalesce(bp);
 }
 
 /*
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-  /* Pad heap start so first payload is at ALIGNMENT. */
-  if ((long)mem_sbrk(ALIGNMENT - offsetof(block_t, payload)) < 0)
+  /* Pad heap start so first payload is at DWORD_ALIGNMENT. */
+
+  if ((heap_start = morecore(MIN_BLOCK_SIZE)) == NULL) {
     return -1;
+  }
+
+  /* Prologue block and epilogue block are blocks which are never freed and
+   * they exists only to eliminate edge conditions during coalescing  */
+
+  PUT(heap_start, 0);                              /* Alignment padding */
+  PUT(heap_start + WORD_SIZE, PROLOGUE_BLOCK);     /* Prologue block header */
+  PUT(heap_start + 2 * WORD_SIZE, PROLOGUE_BLOCK); /* Prologue block footer */
+  PUT(heap_start + 3 * WORD_SIZE, EPILOGUE_BLOCK); /* Epilogue block header */
+
+  /* Indicates start of heap - after Prologue block address */
+  heap_start += 2 * WORD_SIZE;
+
+  /* Extend heap by selected amount - CHUNKSIZE to have some free memory for
+   * blocks allocation */
+  extend_heap(CHUNKSIZE);
 
   return 0;
 }
 
-/*
- * malloc - Allocate a block by incrementing the brk pointer.
- *      Always allocate a block whose size is a multiple of the alignment.
- */
-void *malloc(size_t size) {
-  size = round_up(sizeof(block_t) + size);
-  block_t *block = mem_sbrk(size);
-  if ((long)block < 0)
-    return NULL;
+// Place new allocated block in found free place
+static void place(void *bp, size_t adjusted_size) {
+  if ((GET_SIZE(BLOCK_HEADER(bp)) - adjusted_size) >= (2 * DWORD_SIZE)) {
+    /* Set header */
+    PUT(BLOCK_HEADER(bp), MERGE(adjusted_size, USED));
+    /* Set footer */
+    PUT(BLOCK_FOOTER(bp), MERGE(adjusted_size, USED));
 
-  set_header(block, size, true);
-  return block->payload;
+    size_t next_block_new_size = GET_SIZE(BLOCK_HEADER(bp)) - adjusted_size;
+    assert(next_block_new_size >= 0);
+
+    /* Update header of next block */
+    PUT(BLOCK_HEADER(NEXT_BLOCK(bp)), MERGE(next_block_new_size, FREE));
+    /* Update footer of next block */
+    PUT(BLOCK_FOOTER(NEXT_BLOCK(bp)), MERGE(next_block_new_size, FREE));
+  } else {
+    PUT(BLOCK_HEADER(bp), MERGE(GET_SIZE(BLOCK_HEADER(bp)), USED));
+    PUT(BLOCK_FOOTER(bp), MERGE(GET_SIZE(BLOCK_HEADER(bp)), USED));
+  }
+}
+
+// Find free block by first-fit strategy
+static void *find_fit(size_t adjusted_size) {
+  void *current_heap_address = heap_start;
+  size_t current_block_size = GET_SIZE(BLOCK_HEADER(current_heap_address));
+
+  while (GET_SIZE(BLOCK_HEADER(current_heap_address)) > 0) {
+    /* If block is free and have proper size */
+    if (GET_ALLOCATION_BIT(BLOCK_HEADER(current_heap_address)) == FREE &&
+        current_block_size >= adjusted_size) {
+      return current_heap_address;
+    }
+    /* Else continue searching (go to next block address) */
+    else {
+      current_heap_address = NEXT_BLOCK(current_heap_address);
+      current_block_size = GET_SIZE(BLOCK_HEADER(current_heap_address));
+    }
+  }
+
+  /* No fit */
+  return NULL;
 }
 
 /*
- * free - We don't know how to free a block.  So we ignore this call.
- *      Computers have big memories; surely it won't be a problem.
+ * malloc - Allocate a block by incrementing the brk pointer.
  */
-void free(void *ptr) {
+void *malloc(size_t size) {
+  if (size == 0) {
+    return NULL;
+  }
+
+  if (heap_start == 0) {
+    mm_init();
+  }
+
+  size_t adjusted_size;
+
+  if (size <= DWORD_SIZE) {
+    adjusted_size = MIN_BLOCK_SIZE;
+  } else {
+    adjusted_size = round_up(size);
+  }
+
+  /* Search the free list for a fit */
+  char *bp;
+
+  if ((bp = find_fit(adjusted_size)) != NULL) {
+    place(bp, adjusted_size);
+    return bp;
+  }
+
+  /* No fit found. Extend heap and place the block */
+  size_t amount_to_extend_heap = MAX(adjusted_size, CHUNKSIZE);
+
+  if ((bp = extend_heap(amount_to_extend_heap)) != NULL) {
+    place(bp, adjusted_size);
+    return bp;
+  }
+
+  return NULL;
+}
+
+/*
+ * free
+ */
+void free(void *bp) {
+  size_t size_to_free = GET_SIZE(BLOCK_HEADER(bp));
+
+  PUT(BLOCK_HEADER(bp), MERGE(size_to_free, FREE));
+  PUT(BLOCK_FOOTER(bp), MERGE(size_to_free, FREE));
+
+  coalesce(bp);
 }
 
 /*
@@ -115,10 +328,11 @@ void *realloc(void *old_ptr, size_t size) {
     return NULL;
 
   /* Copy the old data. */
-  block_t *block = old_ptr - offsetof(block_t, payload);
-  size_t old_size = get_size(block);
+  size_t old_size = GET_SIZE(BLOCK_HEADER(old_ptr));
+
   if (size < old_size)
     old_size = size;
+
   memcpy(new_ptr, old_ptr, old_size);
 
   /* Free the old block. */
@@ -142,7 +356,7 @@ void *calloc(size_t nmemb, size_t size) {
 }
 
 /*
- * mm_checkheap - So simple, it doesn't need a checker!
+ * mm_checkheap
  */
 void mm_checkheap(int verbose) {
 }
