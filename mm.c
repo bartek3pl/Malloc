@@ -43,7 +43,7 @@
 #define MIN_BLOCK_SIZE 16   /* Minimum overall size of block */
 #define CHUNKSIZE (1 << 12) /* Extend heap by this amount */
 
-#define MAX_BLOCK_SIZE ~0x7         /* 29 most significant bits */
+#define MAX_BLOCK_SIZE ~0xF         /* 28 most significant bits */
 #define MAX_ALLOCATION_BIT_SIZE 0x1 /* Just 1 bit for allocation bit */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -75,10 +75,10 @@ typedef enum {
 } bt_alloc_bit;
 
 /* Prologue and epilogue blocks sizes */
-#define PROLOGUE_BLOCK MERGE(DWORD_SIZE, USED)
+#define PROLOGUE_BLOCK MERGE(12, USED)
 #define EPILOGUE_BLOCK MERGE(0, USED)
 
-typedef int32_t word_t; /* Heap is bascially an array of 4-byte words. */
+typedef int32_t word_t; /* Heap is basically an array of 4-byte words. */
 
 static char *heap_start = 0; /* Address of the first block in heap */
 
@@ -89,8 +89,11 @@ typedef struct {
   word_t footer;  /* Footer with block size and allocation bit */
 } block_t;
 
+// Round up to 16 bits
 static inline size_t round_up(size_t size) {
-  return DWORD_SIZE * ((DWORD_SIZE + size + (DWORD_SIZE - 1)) / DWORD_SIZE);
+  return 2 * DWORD_SIZE *
+         (((2 * DWORD_SIZE) + size + ((2 * DWORD_SIZE) - 1)) /
+          (2 * DWORD_SIZE));
 }
 
 // Try to increase heap size and return start address of new memory
@@ -156,18 +159,21 @@ static void *coalesce(void *bp) {
 static void *extend_heap(size_t size) {
   size_t words = size / WORD_SIZE; /* Number of words in size */
 
-  /* New size needs to be double-word aligned, so if the words number is even
-  then we already have proper alignment, else we need to align one more block */
-
+  /* New size needs to be 16 bits aligned */
   size_t adjusted_new_size = 0;
-  if (words % 2) {
+
+  if (words % 4 == 0) {
     adjusted_new_size = size;
-  } else {
+  } else if (words % 4 == 1) {
+    adjusted_new_size = size + 3 * WORD_SIZE;
+  } else if (words % 4 == 2) {
+    adjusted_new_size = size + 2 * WORD_SIZE;
+  } else if (words % 4 == 3) {
     adjusted_new_size = size + WORD_SIZE;
   }
 
-  char *bp = morecore(adjusted_new_size);
-  if (bp == NULL) {
+  char *bp;
+  if ((bp = morecore(adjusted_new_size)) == NULL) {
     return NULL;
   }
 
@@ -188,26 +194,28 @@ static void *extend_heap(size_t size) {
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-  /* Pad heap start so first payload is at DWORD_ALIGNMENT. */
 
-  if ((heap_start = morecore(MIN_BLOCK_SIZE)) == NULL) {
+  /* Set initial size of heap */
+  if ((heap_start = morecore(7 * WORD_SIZE)) == NULL) {
     return -1;
   }
 
   /* Prologue block and epilogue block are blocks which are never freed and
    * they exists only to eliminate edge conditions during coalescing  */
 
-  PUT(heap_start, 0);                              /* Alignment padding */
-  PUT(heap_start + WORD_SIZE, PROLOGUE_BLOCK);     /* Prologue block header */
-  PUT(heap_start + 2 * WORD_SIZE, PROLOGUE_BLOCK); /* Prologue block footer */
-  PUT(heap_start + 3 * WORD_SIZE, EPILOGUE_BLOCK); /* Epilogue block header */
+  PUT(heap_start, 0);                                /* Alignment padding */
+  PUT(heap_start + WORD_SIZE, PROLOGUE_BLOCK);       /* Prologue block header */
+  PUT(heap_start + (4 * WORD_SIZE), PROLOGUE_BLOCK); /* Prologue block footer */
+  PUT(heap_start + (7 * WORD_SIZE), EPILOGUE_BLOCK); /* Epilogue block header */
 
   /* Indicates start of heap - after Prologue block address */
-  heap_start += 2 * WORD_SIZE;
+  heap_start += 4 * WORD_SIZE;
 
   /* Extend heap by selected amount - CHUNKSIZE to have some free memory for
    * blocks allocation */
-  extend_heap(CHUNKSIZE);
+  if (extend_heap(CHUNKSIZE) == NULL) {
+    return -1;
+  }
 
   return 0;
 }
@@ -261,10 +269,6 @@ static void *find_fit(size_t adjusted_size) {
 void *malloc(size_t size) {
   if (size == 0) {
     return NULL;
-  }
-
-  if (heap_start == 0) {
-    mm_init();
   }
 
   size_t adjusted_size;
@@ -359,4 +363,7 @@ void *calloc(size_t nmemb, size_t size) {
  * mm_checkheap
  */
 void mm_checkheap(int verbose) {
+  if (verbose) {
+    printf("Heap: %p\n", heap_start);
+  }
 }
